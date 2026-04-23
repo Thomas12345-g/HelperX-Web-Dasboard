@@ -1,8 +1,9 @@
 """
 HelperX Dashboard — Flask Backend mit Discord OAuth2
+OAuth-State wird im Cookie gespeichert (überlebt Render-Schlafzyklen)
 """
 
-from flask import Flask, jsonify, request, send_from_directory, session, redirect
+from flask import Flask, jsonify, request, send_from_directory, session, redirect, make_response
 from flask_cors import CORS
 import json, os, copy, secrets
 import urllib.request, urllib.error, urllib.parse
@@ -10,15 +11,22 @@ import requests as req
 from functools import wraps
 
 app = Flask(__name__, static_folder=".")
-app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+
+# SECRET_KEY MUSS als Render Env-Variable gesetzt sein!
+_secret = os.environ.get("SECRET_KEY")
+if not _secret:
+    print("⚠️  WARNUNG: SECRET_KEY nicht gesetzt — Sessions werden nach Restart ungültig!")
+    _secret = secrets.token_hex(32)
+app.secret_key = _secret
+
 CORS(app, supports_credentials=True)
 
-# ── Discord OAuth2 Config (als Env-Variablen setzen!) ──────────────────────
+# ── Discord OAuth2 Config ──────────────────────────────────────────────────
 DISCORD_CLIENT_ID     = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
 DISCORD_REDIRECT_URI  = os.environ.get("DISCORD_REDIRECT_URI", "http://localhost:5000/auth/callback")
 DISCORD_API           = "https://discord.com/api/v10"
-MANAGE_GUILD          = 0x20  # Permission-Bit: Server verwalten
+MANAGE_GUILD          = 0x20
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -93,7 +101,7 @@ def require_guild_access(f):
 @app.route("/auth/login")
 def auth_login():
     state = secrets.token_urlsafe(16)
-    session["oauth_state"] = state
+
     params = urllib.parse.urlencode({
         "client_id":     DISCORD_CLIENT_ID,
         "redirect_uri":  DISCORD_REDIRECT_URI,
@@ -101,53 +109,103 @@ def auth_login():
         "scope":         "identify guilds",
         "state":         state,
     })
-    return redirect(f"https://discord.com/oauth2/authorize?{params}")
+
+    response = make_response(redirect(f"https://discord.com/oauth2/authorize?{params}"))
+
+    # State im Cookie statt Session speichern
+    # → überlebt Render-Neustarts während der User auf Discord einloggt
+    response.set_cookie(
+        "oauth_state", state,
+        max_age=300,      # 5 Minuten
+        httponly=True,
+        samesite="Lax",
+        secure=bool(os.environ.get("RENDER")),  # HTTPS auf Render
+    )
+    return response
+
 
 @app.route("/auth/callback")
 def auth_callback():
-    code  = request.args.get("code")
-    state = request.args.get("state")
+    code         = request.args.get("code", "")
+    state_param  = request.args.get("state", "")
+    state_cookie = request.cookies.get("oauth_state", "")
 
-    if not code or state != session.pop("oauth_state", None):
-        return "Ungültiger Login-Versuch (State mismatch).", 400
+    # Kein Code → neu einloggen
+    if not code:
+        print("[Auth] Kein code-Parameter")
+        return redirect("/login.html")
+
+    # State-Mismatch → neu einloggen (statt harter Fehlerseite)
+    if not state_cookie or state_cookie != state_param:
+        print(f"[Auth] State mismatch: cookie={state_cookie!r} param={state_param!r}")
+        return redirect("/auth/login")
 
     # Code gegen Access Token tauschen
-    token_resp = req.post(f"{DISCORD_API}/oauth2/token", data={
-        "client_id":     DISCORD_CLIENT_ID,
-        "client_secret": DISCORD_CLIENT_SECRET,
-        "grant_type":    "authorization_code",
-        "code":          code,
-        "redirect_uri":  DISCORD_REDIRECT_URI,
-    }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        token_resp = req.post(
+            f"{DISCORD_API}/oauth2/token",
+            data={
+                "client_id":     DISCORD_CLIENT_ID,
+                "client_secret": DISCORD_CLIENT_SECRET,
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  DISCORD_REDIRECT_URI,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[Auth] Token-Request Fehler: {e}")
+        return redirect("/auth/login")
 
     if token_resp.status_code != 200:
-        return f"Token-Fehler: {token_resp.text}", 400
+        print(f"[Auth] Token-Fehler {token_resp.status_code}: {token_resp.text}")
+        return redirect("/auth/login")
 
-    access_token = token_resp.json()["access_token"]
+    access_token = token_resp.json().get("access_token", "")
+    if not access_token:
+        return redirect("/auth/login")
+
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # User-Info + Guilds von Discord holen
-    user   = req.get(f"{DISCORD_API}/users/@me", headers=headers).json()
-    guilds = req.get(f"{DISCORD_API}/users/@me/guilds", headers=headers).json()
+    # User-Info + Guilds holen
+    try:
+        user   = req.get(f"{DISCORD_API}/users/@me",        headers=headers, timeout=10).json()
+        guilds = req.get(f"{DISCORD_API}/users/@me/guilds", headers=headers, timeout=10).json()
+    except Exception as e:
+        print(f"[Auth] Discord API Fehler: {e}")
+        return redirect("/auth/login")
 
-    # Nur Guilds wo User MANAGE_GUILD hat (Admin / Owner)
+    if not isinstance(guilds, list):
+        print(f"[Auth] Guilds-Response ungültig: {guilds}")
+        return redirect("/auth/login")
+
+    # Nur Guilds mit MANAGE_GUILD-Permission
     managed_ids = [
         g["id"] for g in guilds
-        if int(g.get("permissions", 0)) & MANAGE_GUILD
+        if isinstance(g.get("permissions"), (int, str))
+        and int(g.get("permissions", 0)) & MANAGE_GUILD
     ]
 
-    session["user_id"]   = user["id"]
-    session["username"]  = user.get("global_name") or user["username"]
+    session["user_id"]   = user.get("id", "")
+    session["username"]  = user.get("global_name") or user.get("username", "Unbekannt")
     session["avatar"]    = user.get("avatar")
     session["guild_ids"] = managed_ids
+    session.permanent    = True
 
-    # Cache-Busting: ?t=... zwingt Browser zur Neuladung statt 304-Cache
-    return redirect("/?t=" + secrets.token_urlsafe(6))
+    # Cache-Busting + State-Cookie löschen
+    response = make_response(redirect("/?t=" + secrets.token_urlsafe(6)))
+    response.delete_cookie("oauth_state")
+    return response
+
 
 @app.route("/auth/logout")
 def auth_logout():
     session.clear()
-    return redirect("/login.html")
+    response = make_response(redirect("/login.html"))
+    response.delete_cookie("oauth_state")
+    return response
+
 
 @app.route("/auth/me")
 def auth_me():
@@ -166,10 +224,9 @@ def auth_me():
 @app.route("/api/guilds")
 @require_auth
 def get_guilds():
-    """Gibt nur die Guilds des eingeloggten Users zurück."""
     all_data = load_json(FILES["guild"])
     user_ids = get_user_guild_ids()
-    visible = [gid for gid in all_data.keys() if gid in user_ids]
+    visible  = [gid for gid in all_data.keys() if gid in user_ids]
     return jsonify(visible)
 
 @app.route("/api/guild/<guild_id>", methods=["GET"])
@@ -227,7 +284,7 @@ def send_message():
     data       = request.json or {}
     channel_id = data.get("channel_id", "").strip()
     message    = data.get("message", "").strip()
-    token      = os.environ.get("BOT_TOKEN", "")  # ← sicher aus Env, nie vom Frontend
+    token      = os.environ.get("BOT_TOKEN", "")
 
     if not channel_id or not message:
         return jsonify({"success": False, "error": "channel_id und message werden benötigt."})
@@ -266,6 +323,8 @@ def index():
 @app.route("/login.html")
 def login_page():
     return send_from_directory(".", "login.html")
+
+# ── Start ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("🚀 HelperX Dashboard → http://localhost:5000")
