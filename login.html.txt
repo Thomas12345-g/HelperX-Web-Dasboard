@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>HelperX – Login</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0d1117;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; font-family: sans-serif;
+    }
+    .card {
+      background: #161b22; border: 1px solid #30363d;
+      border-radius: 12px; padding: 48px 40px; text-align: center; width: 360px;
+    }
+    h1 { color: #fff; font-size: 24px; margin-bottom: 8px; }
+    p  { color: #8b949e; margin-bottom: 32px; font-size: 14px; }
+    a.btn {
+      display: inline-block; background: #5865F2; color: #fff;
+      padding: 14px 32px; border-radius: 8px; text-decoration: none;
+      font-weight: 600; font-size: 15px; transition: background .2s;
+    }
+    a.btn:hover { background: #4752c4; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🤖 HelperX Dashboard</h1>
+    <p>Melde dich mit deinem Discord-Account an, um deine Server zu verwalten.</p>
+    <a class="btn" href="/auth/login">Mit Discord anmelden</a>
+  </div>
+</body>
+</html>
