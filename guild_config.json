@@ -1,0 +1,29 @@
+{
+  "1493276175429013735": {
+    "welcome_enabled": true,
+    "welcome_channel": null,
+    "welcome_title": "👋 Willkommen auf {server}!",
+    "welcome_message": "Hey {user}, schön dass du da bist! Du bist Mitglied #{count}.",
+    "welcome_color": "#59f363",
+    "welcome_thumbnail": null,
+    "welcome_banner": null,
+    "log_enabled": false,
+    "log_channel": null,
+    "mod_log_channel": null,
+    "log_joins": true,
+    "log_leaves": true,
+    "log_bans": true,
+    "log_msg_edit": true,
+    "log_msg_delete": true,
+    "automod_enabled": false,
+    "automod_action": "delete",
+    "automod_spam": true,
+    "automod_spam_limit": 5,
+    "automod_spam_window": 5,
+    "automod_links": false,
+    "automod_caps": false,
+    "automod_caps_pct": 70,
+    "automod_mute_minutes": 5,
+    "automod_whitelist_roles": []
+  }
+}
