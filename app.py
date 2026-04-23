@@ -141,7 +141,8 @@ def auth_callback():
     session["avatar"]    = user.get("avatar")
     session["guild_ids"] = managed_ids
 
-    return redirect("/")
+    # Cache-Busting: ?t=... zwingt Browser zur Neuladung statt 304-Cache
+    return redirect("/?t=" + secrets.token_urlsafe(6))
 
 @app.route("/auth/logout")
 def auth_logout():
