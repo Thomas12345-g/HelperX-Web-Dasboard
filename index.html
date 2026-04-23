@@ -423,19 +423,8 @@ hr.div { border:none;border-top:1px solid var(--border);margin:20px 0; }
       <div class="page-sub">Direkt über den Bot eine Nachricht in Discord posten</div>
     </div>
     <div class="card">
-      <div class="card-title">🔑 Bot Token</div>
-      <div class="fgroup" style="margin-bottom:6px">
-        <label class="flabel">Discord Bot Token</label>
-        <div style="display:flex;gap:10px;align-items:center">
-          <input type="password" id="msg-token" placeholder="MTQ4Nj…" style="flex:1">
-          <button onclick="toggleToken()" style="padding:10px 14px;background:rgba(88,101,242,.15);color:var(--accentL);border:1px solid rgba(88,101,242,.25);border-radius:9px;cursor:pointer;font-family:var(--mono);font-size:12px;white-space:nowrap;transition:background .2s" onmouseover="this.style.background='rgba(88,101,242,.28)'" onmouseout="this.style.background='rgba(88,101,242,.15)'" id="toggle-btn">👁 Zeigen</button>
-        </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">⚠️ Token wird nur lokal verwendet und nicht gespeichert.</div>
-      </div>
- 
-      <hr class="div">
       <div class="card-title">💬 Nachricht</div>
-      <div class="form-grid">
+      <div class="form-grid" style="margin-top:18px">
         <div class="fgroup fg-full">
           <label class="flabel">Channel-ID</label>
           <input type="text" id="msg-channel" placeholder="z.B. 1234567890123456789">
@@ -504,11 +493,9 @@ async function apiFetch(path, opts) {
 /* ── LOAD OVERVIEW ── */
 async function loadOverview() {
   try {
-    // Auth prüfen
     const me = await fetch('/auth/me', { credentials: 'include' }).then(r => r.json());
     if (!me.logged_in) { window.location.href = '/login.html'; return; }
  
-    // User im Sidebar anzeigen
     document.getElementById('sidebar-user').textContent = me.username;
     if (me.avatar) {
       document.getElementById('sidebar-avatar').src =
@@ -527,7 +514,6 @@ async function loadOverview() {
     animCount(document.getElementById('s-automod'), stats.guilds_with_automod);
     animCount(document.getElementById('s-warns'),   stats.total_warnings);
  
-    // Guild-Dropdown befüllen
     const sel = document.getElementById('guild-select');
     if (!guilds.length) {
       sel.innerHTML = '<option value="">— Kein Server gefunden —</option>';
@@ -537,11 +523,8 @@ async function loadOverview() {
     }
  
     sel.innerHTML = guilds.map(id => `<option value="${id}">${id}</option>`).join('');
- 
-    // Ersten Server automatisch auswählen
     selectGuild(guilds[0]);
  
-    // Guild-Liste in Übersicht
     const gl = document.getElementById('guild-list');
     gl.innerHTML = guilds.map(id =>
       `<div style="display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--border)">
@@ -797,21 +780,11 @@ function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'
 /* ════════════════════════════════════════════════════
    SEND MESSAGE
 ════════════════════════════════════════════════════ */
-function toggleToken() {
-  const inp = document.getElementById('msg-token');
-  const btn = document.getElementById('toggle-btn');
-  if (inp.type === 'password') { inp.type = 'text';     btn.textContent = '🙈 Verstecken'; }
-  else                         { inp.type = 'password'; btn.textContent = '👁 Zeigen'; }
-}
- 
 async function sendMessage() {
-  const token   = document.getElementById('msg-token').value.trim();
   const channel = document.getElementById('msg-channel').value.trim();
   const text    = document.getElementById('msg-text').value.trim();
-  const result  = document.getElementById('send-result');
   const btn     = document.getElementById('send-btn');
  
-  if (!token)   { showResult('error', '❌ Bitte Bot Token eingeben.'); return; }
   if (!channel) { showResult('error', '❌ Bitte Channel-ID eingeben.'); return; }
   if (!text)    { showResult('error', '❌ Bitte Nachricht eingeben.'); return; }
  
@@ -821,7 +794,7 @@ async function sendMessage() {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, channel_id: channel, message: text })
+      body: JSON.stringify({ channel_id: channel, message: text })
     });
     const data = await res.json();
     if (data.success) {
