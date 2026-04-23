@@ -168,7 +168,6 @@ def get_guilds():
     """Gibt nur die Guilds des eingeloggten Users zurück."""
     all_data = load_json(FILES["guild"])
     user_ids = get_user_guild_ids()
-    # Schnittmenge: existiert in config UND gehört dem User
     visible = [gid for gid in all_data.keys() if gid in user_ids]
     return jsonify(visible)
 
@@ -211,7 +210,6 @@ def save_automod(guild_id):
 def get_stats():
     guild_data = load_json(FILES["guild"])
     warnings   = load_json(FILES["warnings"])
-    # Nur Stats für eigene Guilds
     user_ids   = get_user_guild_ids()
     own_guilds = {k: v for k, v in guild_data.items() if k in user_ids}
     return jsonify({
@@ -228,10 +226,12 @@ def send_message():
     data       = request.json or {}
     channel_id = data.get("channel_id", "").strip()
     message    = data.get("message", "").strip()
-    token      = data.get("token", "").strip()
+    token      = os.environ.get("BOT_TOKEN", "")  # ← sicher aus Env, nie vom Frontend
 
-    if not channel_id or not message or not token:
-        return jsonify({"success": False, "error": "channel_id, message und token werden benötigt."})
+    if not channel_id or not message:
+        return jsonify({"success": False, "error": "channel_id und message werden benötigt."})
+    if not token:
+        return jsonify({"success": False, "error": "BOT_TOKEN nicht konfiguriert (Render Env-Variable setzen)."})
 
     url     = f"https://discord.com/api/v10/channels/{channel_id}/messages"
     payload = json.dumps({"content": message}).encode("utf-8")
