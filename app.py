@@ -2,34 +2,49 @@
 HelperX Dashboard — Flask Backend mit Discord OAuth2
 OAuth-State wird im Cookie gespeichert (überlebt Render-Schlafzyklen)
 """
-
+ 
 from flask import Flask, jsonify, request, send_from_directory, session, redirect, make_response
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 import json, os, copy, secrets
-import urllib.request, urllib.error, urllib.parse
 import requests as req
 from functools import wraps
-
-app = Flask(__name__, static_folder=".")
-
+ 
+# ── BASE_DIR MUSS vor Flask() definiert werden ────────────────────────────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ 
+# static_folder=BASE_DIR → Flask findet index.html / login.html immer,
+# egal aus welchem Verzeichnis der Prozess gestartet wird
+app = Flask(__name__, static_folder=BASE_DIR)
+ 
+# ProxyFix: Render läuft hinter einem HTTPS-Proxy — ohne das werden Cookies falsch gesetzt
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+ 
 # SECRET_KEY MUSS als Render Env-Variable gesetzt sein!
 _secret = os.environ.get("SECRET_KEY")
 if not _secret:
     print("⚠️  WARNUNG: SECRET_KEY nicht gesetzt — Sessions werden nach Restart ungültig!")
     _secret = secrets.token_hex(32)
 app.secret_key = _secret
-
-CORS(app, supports_credentials=True)
-
+ 
+# Session-Cookie korrekt für HTTPS/Render konfigurieren
+_on_render = bool(os.environ.get("RENDER"))
+app.config.update(
+    SESSION_COOKIE_HTTPONLY   = True,
+    SESSION_COOKIE_SAMESITE   = "Lax",
+    SESSION_COOKIE_SECURE     = _on_render,  # True auf Render (HTTPS), False lokal
+    PERMANENT_SESSION_LIFETIME = 86400 * 7,  # 7 Tage
+)
+ 
+CORS(app, supports_credentials=True, origins="*")
+ 
 # ── Discord OAuth2 Config ──────────────────────────────────────────────────
 DISCORD_CLIENT_ID     = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
 DISCORD_REDIRECT_URI  = os.environ.get("DISCORD_REDIRECT_URI", "http://localhost:5000/auth/callback")
 DISCORD_API           = "https://discord.com/api/v10"
 MANAGE_GUILD          = 0x20
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
+ 
 FILES = {
     "guild":    os.path.join(BASE_DIR, "guild_config.json"),
     "automod":  os.path.join(BASE_DIR, "automod_config.json"),
@@ -37,7 +52,7 @@ FILES = {
     "warnings": os.path.join(BASE_DIR, "warnings.json"),
     "stats":    os.path.join(BASE_DIR, "ticket_stats.json"),
 }
-
+ 
 DEFAULT_GUILD = {
     "welcome_enabled": False, "welcome_channel": None,
     "welcome_title": "👋 Willkommen auf {server}!",
@@ -51,9 +66,9 @@ DEFAULT_GUILD = {
     "automod_links": False, "automod_caps": False, "automod_caps_pct": 70,
     "automod_mute_minutes": 5, "automod_whitelist_roles": [],
 }
-
+ 
 # ── Hilfsfunktionen ────────────────────────────────────────────────────────
-
+ 
 def load_json(path, default=None):
     if os.path.exists(path):
         try:
@@ -62,7 +77,7 @@ def load_json(path, default=None):
         except Exception as e:
             print(f"[Load] {path}: {e}")
     return default if default is not None else {}
-
+ 
 def save_json(path, data):
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -71,12 +86,12 @@ def save_json(path, data):
     except Exception as e:
         print(f"[Save] {path}: {e}")
         return False
-
+ 
 def get_user_guild_ids():
     return set(session.get("guild_ids", []))
-
+ 
 # ── Auth-Decorators ────────────────────────────────────────────────────────
-
+ 
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -84,7 +99,7 @@ def require_auth(f):
             return jsonify({"error": "Nicht eingeloggt", "login": "/auth/login"}), 401
         return f(*args, **kwargs)
     return decorated
-
+ 
 def require_guild_access(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -95,13 +110,14 @@ def require_guild_access(f):
             return jsonify({"error": "Kein Zugriff auf diesen Server"}), 403
         return f(*args, **kwargs)
     return decorated
-
+ 
 # ── OAuth2 Routes ──────────────────────────────────────────────────────────
-
+ 
 @app.route("/auth/login")
 def auth_login():
     state = secrets.token_urlsafe(16)
-
+ 
+    import urllib.parse
     params = urllib.parse.urlencode({
         "client_id":     DISCORD_CLIENT_ID,
         "redirect_uri":  DISCORD_REDIRECT_URI,
@@ -109,37 +125,32 @@ def auth_login():
         "scope":         "identify guilds",
         "state":         state,
     })
-
+ 
     response = make_response(redirect(f"https://discord.com/oauth2/authorize?{params}"))
-
-    # State im Cookie statt Session speichern
-    # → überlebt Render-Neustarts während der User auf Discord einloggt
     response.set_cookie(
         "oauth_state", state,
-        max_age=300,      # 5 Minuten
+        max_age=300,
         httponly=True,
         samesite="Lax",
-        secure=bool(os.environ.get("RENDER")),  # HTTPS auf Render
+        secure=_on_render,
     )
     return response
-
-
+ 
+ 
 @app.route("/auth/callback")
 def auth_callback():
     code         = request.args.get("code", "")
     state_param  = request.args.get("state", "")
     state_cookie = request.cookies.get("oauth_state", "")
-
-    # Kein Code → neu einloggen
+ 
     if not code:
         print("[Auth] Kein code-Parameter")
         return redirect("/login.html")
-
-    # State-Mismatch → neu einloggen (statt harter Fehlerseite)
+ 
     if not state_cookie or state_cookie != state_param:
         print(f"[Auth] State mismatch: cookie={state_cookie!r} param={state_param!r}")
         return redirect("/auth/login")
-
+ 
     # Code gegen Access Token tauschen
     try:
         token_resp = req.post(
@@ -157,56 +168,57 @@ def auth_callback():
     except Exception as e:
         print(f"[Auth] Token-Request Fehler: {e}")
         return redirect("/auth/login")
-
+ 
     if token_resp.status_code != 200:
         print(f"[Auth] Token-Fehler {token_resp.status_code}: {token_resp.text}")
         return redirect("/auth/login")
-
+ 
     access_token = token_resp.json().get("access_token", "")
     if not access_token:
         return redirect("/auth/login")
-
+ 
     headers = {"Authorization": f"Bearer {access_token}"}
-
+ 
     # User-Info + Guilds holen
     try:
-        user   = req.get(f"{DISCORD_API}/users/@me",        headers=headers, timeout=10).json()
-        guilds = req.get(f"{DISCORD_API}/users/@me/guilds", headers=headers, timeout=10).json()
+        user_resp   = req.get(f"{DISCORD_API}/users/@me",        headers=headers, timeout=10)
+        guilds_resp = req.get(f"{DISCORD_API}/users/@me/guilds", headers=headers, timeout=10)
+        user   = user_resp.json()
+        guilds = guilds_resp.json()
     except Exception as e:
         print(f"[Auth] Discord API Fehler: {e}")
         return redirect("/auth/login")
-
+ 
     if not isinstance(guilds, list):
         print(f"[Auth] Guilds-Response ungültig: {guilds}")
         return redirect("/auth/login")
-
+ 
     # Nur Guilds mit MANAGE_GUILD-Permission
     managed_ids = [
         g["id"] for g in guilds
         if isinstance(g.get("permissions"), (int, str))
         and int(g.get("permissions", 0)) & MANAGE_GUILD
     ]
-
+ 
     session["user_id"]   = user.get("id", "")
     session["username"]  = user.get("global_name") or user.get("username", "Unbekannt")
     session["avatar"]    = user.get("avatar")
     session["guild_ids"] = managed_ids
     session.permanent    = True
-
-    # Cache-Busting + State-Cookie löschen
+ 
     response = make_response(redirect("/?t=" + secrets.token_urlsafe(6)))
     response.delete_cookie("oauth_state")
     return response
-
-
+ 
+ 
 @app.route("/auth/logout")
 def auth_logout():
     session.clear()
     response = make_response(redirect("/login.html"))
     response.delete_cookie("oauth_state")
     return response
-
-
+ 
+ 
 @app.route("/auth/me")
 def auth_me():
     if "user_id" not in session:
@@ -218,9 +230,9 @@ def auth_me():
         "avatar":    session["avatar"],
         "guild_ids": session["guild_ids"],
     })
-
+ 
 # ── API Routes (geschützt) ─────────────────────────────────────────────────
-
+ 
 @app.route("/api/guilds")
 @require_auth
 def get_guilds():
@@ -228,7 +240,7 @@ def get_guilds():
     user_ids = get_user_guild_ids()
     visible  = [gid for gid in all_data.keys() if gid in user_ids]
     return jsonify(visible)
-
+ 
 @app.route("/api/guild/<guild_id>", methods=["GET"])
 @require_guild_access
 def get_guild(guild_id):
@@ -236,7 +248,7 @@ def get_guild(guild_id):
     cfg  = copy.deepcopy(DEFAULT_GUILD)
     cfg.update(data.get(str(guild_id), {}))
     return jsonify(cfg)
-
+ 
 @app.route("/api/guild/<guild_id>", methods=["POST"])
 @require_guild_access
 def save_guild(guild_id):
@@ -246,13 +258,13 @@ def save_guild(guild_id):
         data[str(guild_id)] = copy.deepcopy(DEFAULT_GUILD)
     data[str(guild_id)].update(incoming)
     return jsonify({"success": save_json(FILES["guild"], data)})
-
+ 
 @app.route("/api/automod/<guild_id>", methods=["GET"])
 @require_guild_access
 def get_automod(guild_id):
     data = load_json(FILES["automod"])
     return jsonify(data.get(str(guild_id), {}))
-
+ 
 @app.route("/api/automod/<guild_id>", methods=["POST"])
 @require_guild_access
 def save_automod(guild_id):
@@ -262,7 +274,7 @@ def save_automod(guild_id):
         data[str(guild_id)] = {}
     data[str(guild_id)].update(incoming)
     return jsonify({"success": save_json(FILES["automod"], data)})
-
+ 
 @app.route("/api/stats")
 @require_auth
 def get_stats():
@@ -270,14 +282,19 @@ def get_stats():
     warnings   = load_json(FILES["warnings"])
     user_ids   = get_user_guild_ids()
     own_guilds = {k: v for k, v in guild_data.items() if k in user_ids}
+    # Nur Warnings der eigenen Guilds zählen
+    own_warnings = sum(
+        len(v) for k, v in warnings.items()
+        if k in user_ids and isinstance(v, list)
+    )
     return jsonify({
         "total_guilds":        len(own_guilds),
-        "total_warnings":      sum(len(v) for v in warnings.values() if isinstance(v, list)),
+        "total_warnings":      own_warnings,
         "guilds_with_welcome": sum(1 for g in own_guilds.values() if g.get("welcome_enabled")),
         "guilds_with_automod": sum(1 for g in own_guilds.values() if g.get("automod_enabled")),
         "guilds_with_logging": sum(1 for g in own_guilds.values() if g.get("log_enabled")),
     })
-
+ 
 @app.route("/api/send-message", methods=["POST"])
 @require_auth
 def send_message():
@@ -285,47 +302,47 @@ def send_message():
     channel_id = data.get("channel_id", "").strip()
     message    = data.get("message", "").strip()
     token      = os.environ.get("BOT_TOKEN", "")
-
+ 
     if not channel_id or not message:
         return jsonify({"success": False, "error": "channel_id und message werden benötigt."})
     if not token:
         return jsonify({"success": False, "error": "BOT_TOKEN nicht konfiguriert (Render Env-Variable setzen)."})
-
-    url     = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-    payload = json.dumps({"content": message}).encode("utf-8")
-    req_obj = urllib.request.Request(
-        url, data=payload,
-        headers={
-            "Authorization": f"Bot {token}",
-            "Content-Type":  "application/json",
-            "User-Agent":    "HelperXDashboard/1.0",
-        },
-        method="POST",
-    )
+ 
     try:
-        with urllib.request.urlopen(req_obj) as resp:
-            resp_data = json.loads(resp.read().decode())
-            return jsonify({"success": True, "message_id": resp_data.get("id")})
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        return jsonify({"success": False, "error": f"Discord API {e.code}: {body}"})
+        resp = req.post(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            json={"content": message},
+            headers={
+                "Authorization": f"Bot {token}",
+                "User-Agent":    "HelperXDashboard/1.0",
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            return jsonify({"success": True, "message_id": resp.json().get("id")})
+        return jsonify({"success": False, "error": f"Discord API {resp.status_code}: {resp.text}"})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
-
+ 
 # ── Static Files ───────────────────────────────────────────────────────────
-
+ 
 @app.route("/")
 def index():
     if "user_id" not in session:
         return redirect("/login.html")
-    return send_from_directory(".", "index.html")
-
+    return send_from_directory(BASE_DIR, "index.html")
+ 
 @app.route("/login.html")
 def login_page():
-    return send_from_directory(".", "login.html")
-
+    return send_from_directory(BASE_DIR, "login.html")
+ 
+# Alle anderen statischen Dateien (CSS, JS, Bilder usw.)
+@app.route("/<path:filename>")
+def static_files(filename):
+    return send_from_directory(BASE_DIR, filename)
+ 
 # ── Start ──────────────────────────────────────────────────────────────────
-
+ 
 if __name__ == "__main__":
     print("🚀 HelperX Dashboard → http://localhost:5000")
     port = int(os.environ.get("PORT", 5000))
